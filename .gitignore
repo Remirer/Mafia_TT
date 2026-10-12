@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Скачиваемый ICC-профиль (лицензия Adobe не разрешает распространять его вместе с программой)
+.cache/
+*.icc
+
+# Временные файлы превью
+output/preview/_pages/
