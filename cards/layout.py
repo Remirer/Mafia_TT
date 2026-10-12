@@ -203,9 +203,9 @@ def emblem_shapes(icons: EmblemIcons, cfg: EmblemCfg) -> list[Shape]:
 
 @dataclass
 class Face:
-    name: str
+    name: str  # "" for the blank card
     shapes: list[Shape]
-    layout: NameLayout
+    layout: NameLayout | None  # None for the blank card
     warnings: list[str]
 
 
@@ -213,32 +213,54 @@ class LayoutError(ValueError):
     pass
 
 
-def build_face(name: str, style: Style, font: HbFont, icons: EmblemIcons | None) -> Face:
-    nl = layout_name(font, name, style.name, prefer_cx=style.sheet.width / 2)
+# Seed for the bullet holes of the blank card (same holes on every copy).
+BLANK_SEED = "пустая табличка"
+
+
+def _decorations(seed: str, style: Style, icons: EmblemIcons | None) -> tuple[list[Shape], dict[str, BBox], list[str]]:
+    """Emblem + bullet holes, with their ink boxes and safe-zone problems."""
     shapes: list[Shape] = []
-    deco_boxes: dict[str, BBox] = {}
+    boxes: dict[str, BBox] = {}
     if style.emblem.enabled:
         if icons is None:
             raise LayoutError("emblem enabled but icons not loaded")
         em = emblem_shapes(icons, style.emblem)
-        deco_boxes["эмблема"] = union_bbox(s.bbox for s in em)
+        boxes["эмблема"] = union_bbox(s.bbox for s in em)
         shapes += em
     if style.holes.enabled:
         h = style.holes
-        holes = bullet_holes(name.replace("|", " "), h.zone, h.count, h.radius, h.splatter, h.gap)
-        deco_boxes["пулевые отверстия"] = union_bbox(s.bbox for s in holes)
+        holes = bullet_holes(seed, h.zone, h.count, h.radius, h.splatter, h.gap)
+        boxes["пулевые отверстия"] = union_bbox(s.bbox for s in holes)
         shapes += holes
-    shapes += nl.shapes
+    problems = [
+        f"{label} выходит за безопасную зону {style.safe}: {tuple(round(v, 2) for v in bx)}"
+        for label, bx in boxes.items()
+        if not box_inside(bx, style.safe)
+    ]
+    return shapes, boxes, problems
 
-    safe = style.safe
-    problems = []
+
+def build_face(name: str, style: Style, font: HbFont, icons: EmblemIcons | None) -> Face:
+    nl = layout_name(font, name, style.name, prefer_cx=style.sheet.width / 2)
+    shapes, deco_boxes, problems = _decorations(name.replace("|", " "), style, icons)
+    shapes += nl.shapes
     if not box_inside(nl.bbox, style.name.box):
         problems.append(f"ник выходит за зону name.box {style.name.box}: {nl.bbox}")
     for label, bx in deco_boxes.items():
-        if not box_inside(bx, safe):
-            problems.append(f"{label} выходит за безопасную зону {safe}: {tuple(round(v, 2) for v in bx)}")
         if boxes_overlap(bx, nl.bbox, gap=1.0):
             problems.append(f"{label} пересекается с ником")
     if problems:
         raise LayoutError(f"«{name}»: " + "; ".join(problems))
     return Face(name, shapes, nl, list(nl.warnings))
+
+
+def build_blank_face(style: Style, icons: EmblemIcons | None) -> Face:
+    """Card without a nickname: decorations only, the name zone stays empty
+    for writing the nickname by hand with a marker."""
+    shapes, deco_boxes, problems = _decorations(BLANK_SEED, style, icons)
+    for label, bx in deco_boxes.items():
+        if boxes_overlap(bx, style.name.box):
+            problems.append(f"{label} заходит в зону ника name.box — там должно остаться место под маркер")
+    if problems:
+        raise LayoutError("пустая табличка: " + "; ".join(problems))
+    return Face("", shapes, None, [])

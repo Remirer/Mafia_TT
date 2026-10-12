@@ -1,13 +1,15 @@
 from pathlib import Path
 
 import pytest
+from pypdf import PdfReader
 
 from cards.__main__ import main
 from cards.config import load_names, load_style, normalize_name
-from cards.layout import EmblemIcons, build_face, layout_name
-from cards.paths import apply, box_inside, flatten
-from cards.pdf import PageGeometry, shapes_ops, sheet_ops, write_pdf
+from cards.layout import EmblemIcons, build_blank_face, build_face, layout_name
+from cards.paths import apply, box_inside, boxes_overlap, flatten
+from cards.pdf import PT_PER_MM, PageGeometry, face_page_ops, shapes_ops, sheet_ops, write_pdf
 from cards.text import HbFont, MissingGlyphError
+from cards.preview import screen_palette
 from cards.verify import verify_pdf
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,11 +91,39 @@ def test_red_ink_never_touches_black(font, style, names, icons):
                         assert min((x - bx) ** 2 + (y - by) ** 2 for bx, by in bp) ** 0.5 > gap * 0.5
 
 
+def test_blank_card_keeps_name_zone_empty(style, icons):
+    face = build_blank_face(style, icons)
+    assert face.layout is None and face.name == ""
+    assert {s.tag for s in face.shapes} == {"emblem", "hole", "splatter"}
+    assert all(box_inside(s.bbox, style.safe) for s in face.shapes)
+    assert not any(boxes_overlap(s.bbox, style.name.box) for s in face.shapes)
+
+
+def test_preview_pdf_is_one_rgb_face_per_page(tmp_path, font, style, names, icons):
+    faces = [build_face(n, style, font, icons) for n in names[:2]] + [build_blank_face(style, icons)]
+    rgb = screen_palette(style.colors, None)
+    out = tmp_path / "preview.pdf"
+    write_pdf(
+        out,
+        [face_page_ops(shapes_ops(f.shapes, style.colors, rgb=rgb)) for f in faces],
+        PageGeometry(297, 105, 0),
+        title="предпросмотр",
+    )
+    rep = verify_pdf(out, kind="preview", palette=style.colors, rgb_palette=rgb, pages=3)
+    assert rep.ok, rep.errors
+    page = PdfReader(out).pages[0]
+    assert float(page.mediabox.width) == pytest.approx(297 * PT_PER_MM, abs=0.01)
+    assert float(page.mediabox.height) == pytest.approx(105 * PT_PER_MM, abs=0.01)
+    ops = page.get_contents().get_data()
+    assert b" rg" in ops and b" k\n" not in ops  # DeviceRGB only, no CMYK, no rotated copy
+    assert b"-1 0 0 -1" not in ops
+
+
 def test_top_half_is_rotated_180():
     # the matrix used in sheet_ops for the top half
     t = (-1.0, 0.0, 0.0, -1.0, 297.0, 210.0)
     assert apply(t, (10.0, 20.0)) == (287.0, 190.0)
-    assert b"-1 0 0 -1 297 210 cm" in sheet_ops("", sheet_w=297, sheet_h=210, offset=0)
+    assert b"-1 0 0 -1 297 210 cm" in sheet_ops("0 0 m 1 1 l h f", sheet_w=297, sheet_h=210, offset=0)
 
 
 def test_print_pdf_passes_checks(tmp_path, font, style, names, icons):
@@ -122,5 +152,11 @@ def test_cli_build_is_reproducible(tmp_path, monkeypatch):
     a, b = tmp_path / "a", tmp_path / "b"
     assert main(["--out", str(a), "--no-icc", "--no-preview"]) == 0
     assert main(["--out", str(b), "--no-icc", "--no-preview"]) == 0
-    for name in ("mafia_tablichki_print_FOGRA39.pdf", "mafia_tablichki_A4_office.pdf"):
+    for name in (
+        "mafia_tablichki_print_FOGRA39.pdf",
+        "mafia_tablichki_A4_office.pdf",
+        "mafia_tablichka_pustaya_print_FOGRA39.pdf",
+        "mafia_tablichka_pustaya_A4_office.pdf",
+        "mafia_tablichki_preview.pdf",
+    ):
         assert (a / name).read_bytes() == (b / name).read_bytes()

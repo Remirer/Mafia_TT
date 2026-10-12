@@ -304,3 +304,9 @@ def cmyk_ops(cmyk: Sequence[float], stroke: bool = False) -> str:
     """CMYK in percent (0..100) → DeviceCMYK colour operator."""
     vals = " ".join(num(v / 100.0) for v in cmyk)
     return f"{vals} {'K' if stroke else 'k'}"
+
+
+def rgb_ops(rgb: Sequence[float], stroke: bool = False) -> str:
+    """RGB in 0..1 → DeviceRGB colour operator (screen preview only)."""
+    vals = " ".join(num(v) for v in rgb)
+    return f"{vals} {'RG' if stroke else 'rg'}"

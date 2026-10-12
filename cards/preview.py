@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path as FsPath
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -25,6 +25,38 @@ FONT_CANDIDATES = [
 
 def available() -> bool:
     return shutil.which("pdftoppm") is not None
+
+
+def screen_palette(
+    colors: Mapping[str, Sequence[float]], icc: FsPath | None
+) -> dict[str, tuple[float, float, float]]:
+    """CMYK palette (percent) → sRGB (0..1) as the colours will look printed.
+
+    With the FOGRA39 profile this is a soft proof (relative colorimetric with
+    black point compensation, like a typical on-screen proof); without it a
+    naive formula is used.
+    """
+    names = list(colors)
+    if icc is not None:
+        from PIL import ImageCms
+
+        transform = ImageCms.buildTransform(
+            ImageCms.getOpenProfile(str(icc)),
+            ImageCms.createProfile("sRGB"),
+            "CMYK",
+            "RGB",
+            renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC,
+            flags=ImageCms.Flags.BLACKPOINTCOMPENSATION,
+        )
+        im = Image.new("CMYK", (len(names), 1))
+        im.putdata([tuple(round(v * 2.55) for v in colors[n]) for n in names])
+        rgb = ImageCms.applyTransform(im, transform)
+        return {n: tuple(round(c / 255, 3) for c in rgb.getpixel((i, 0))) for i, n in enumerate(names)}
+    out = {}
+    for n in names:
+        c, m, y, k = (v / 100 for v in colors[n])
+        out[n] = tuple(round((1 - x) * (1 - k), 3) for x in (c, m, y))
+    return out
 
 
 def _label_font(size: int):

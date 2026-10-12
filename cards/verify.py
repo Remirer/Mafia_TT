@@ -58,8 +58,12 @@ def _close(a: float, b: float, tol: float = 0.02) -> bool:
     return abs(a - b) <= tol
 
 
-def _ink_boxes(ops) -> tuple[list[tuple[tuple, tuple[float, float, float, float], bytes]], list[str]]:
-    """Mini content-stream interpreter: bbox (pt) and colour of every painted path."""
+def _ink_boxes(ops, rgb: bool = False) -> tuple[list[tuple[tuple, tuple[float, float, float, float], bytes]], list[str]]:
+    """Mini content-stream interpreter: bbox (pt) and colour of every painted path.
+
+    DeviceRGB operators (rg/RG) are accepted only for the screen preview.
+    """
+    allowed_ops = ALLOWED_OPS | {b"rg", b"RG"} if rgb else ALLOWED_OPS
     problems: list[str] = []
     ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     fill = stroke = (0.0, 0.0, 0.0, 1.0)
@@ -68,7 +72,7 @@ def _ink_boxes(ops) -> tuple[list[tuple[tuple, tuple[float, float, float, float]
     pts: list[tuple[float, float]] = []
     out = []
     for operands, op in ops:
-        if op not in ALLOWED_OPS:
+        if op not in allowed_ops:
             problems.append(f"недопустимый оператор {op.decode('latin1')!r}")
             continue
         v = [float(x) for x in operands] if op not in (b"q", b"Q") else []
@@ -85,9 +89,9 @@ def _ink_boxes(ops) -> tuple[list[tuple[tuple, tuple[float, float, float, float]
             pts.append(apply(ctm, (v[0], v[1])))
         elif op == b"c":
             pts += [apply(ctm, (v[i], v[i + 1])) for i in (0, 2, 4)]
-        elif op == b"k":
+        elif op in (b"k", b"rg"):
             fill = _key(v)
-        elif op == b"K":
+        elif op in (b"K", b"RG"):
             stroke = _key(v)
         elif op == b"w":
             lw = v[0]
@@ -121,10 +125,16 @@ def verify_pdf(
     fold_margin: float = 8.0,
     pages: int | None = None,
     render: bool = True,
+    rgb_palette: Mapping[str, Sequence[float]] | None = None,
 ) -> Report:
+    """kind: "print" (PDF/X-1a, bleed), "office" (plain A4) or "preview"
+    (one face per page, DeviceRGB colours from `rgb_palette`)."""
     rep = Report(path)
     raw = path.read_bytes()
     pdfx = kind == "print"
+    preview = kind == "preview"
+    if preview and rgb_palette is None:
+        raise ValueError("для проверки предпросмотра нужна rgb_palette")
     b = bleed if pdfx else 0.0
     W, H = sheet
 
@@ -192,15 +202,22 @@ def verify_pdf(
         rep.note("офисный файл содержит OutputIntent")
 
     # --- pages: boxes, operators, colours, geometry
-    allowed = {_key([v / 100 for v in c]) for c in palette.values()}
-    white = _key([v / 100 for v in palette.get("white", (0, 0, 0, 0))])
-    fold = _key([v / 100 for v in palette.get("fold_mark", (0, 0, 0, 40))])
-    mw, mh = (W + 2 * b) * PT_PER_MM, (H + 2 * b) * PT_PER_MM
     fh = H / 2
-    safe_zones = [
-        (margin, margin, W - margin, fh - fold_margin),  # bottom face
-        (margin, fh + fold_margin, W - margin, H - margin),  # top face (rotated)
-    ]
+    if preview:
+        allowed = {_key(c) for c in rgb_palette.values()}
+        white = _key(rgb_palette.get("white", (1, 1, 1)))
+        fold = None
+        mw, mh = W * PT_PER_MM, fh * PT_PER_MM
+        safe_zones = [(margin, margin, W - margin, fh - fold_margin)]  # one face per page
+    else:
+        allowed = {_key([v / 100 for v in c]) for c in palette.values()}
+        white = _key([v / 100 for v in palette.get("white", (0, 0, 0, 0))])
+        fold = _key([v / 100 for v in palette.get("fold_mark", (0, 0, 0, 40))])
+        mw, mh = (W + 2 * b) * PT_PER_MM, (H + 2 * b) * PT_PER_MM
+        safe_zones = [
+            (margin, margin, W - margin, fh - fold_margin),  # bottom face
+            (margin, fh + fold_margin, W - margin, H - margin),  # top face (rotated)
+        ]
     trim_pt = (b * PT_PER_MM, b * PT_PER_MM, (b + W) * PT_PER_MM, (b + H) * PT_PER_MM)
     for i, page in enumerate(reader.pages, 1):
         mb = [float(x) for x in page.mediabox]
@@ -220,7 +237,7 @@ def verify_pdf(
         if contents is None:
             rep.err(f"стр. {i}: пустая страница")
             continue
-        boxes, problems = _ink_boxes(ContentStream(contents, reader).operations)
+        boxes, problems = _ink_boxes(ContentStream(contents, reader).operations, rgb=preview)
         for p in sorted(set(problems)):
             rep.err(f"стр. {i}: {p}")
         for col, box, _ in boxes:
@@ -241,7 +258,7 @@ def verify_pdf(
                 rep.err(f"стр. {i}: краска вне безопасной зоны: {tuple(round(v, 2) for v in mm)}")
                 break
 
-    if render and not rep.errors:
+    if render and not preview and not rep.errors:
         _render_symmetry(path, rep, b, W, H)
     return rep
 

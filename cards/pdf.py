@@ -29,7 +29,7 @@ from pypdf.generic import (
     TextStringObject,
 )
 
-from .paths import Shape, cmyk_ops, num, path_ops
+from .paths import Shape, cmyk_ops, num, path_ops, rgb_ops
 
 PT_PER_MM = 72.0 / 25.4
 
@@ -40,23 +40,33 @@ FOGRA39 = {
 }
 
 
-def shapes_ops(shapes: Sequence[Shape], palette: Mapping[str, Sequence[float]]) -> str:
+def shapes_ops(
+    shapes: Sequence[Shape],
+    palette: Mapping[str, Sequence[float]],
+    rgb: Mapping[str, Sequence[float]] | None = None,
+) -> str:
     """Serialise shapes (face coordinates, mm) into content-stream operators.
+
+    Colours come from the CMYK `palette` (percent). If an `rgb` palette
+    (0..1) is given, DeviceRGB is written instead — only for the on-screen
+    preview, never for print files.
 
     The result is self-contained: colours and line width are always set
     before first use, so the same string can be emitted twice (upright and
     rotated) inside one page.
     """
+    colour_ops = rgb_ops if rgb is not None else cmyk_ops
+    colours = rgb if rgb is not None else palette
     out: list[str] = []
     fill = stroke = width = None
     for s in shapes:
-        col = tuple(palette[s.color])
+        col = tuple(colours[s.color])
         if s.paint in ("f", "B") and col != fill:
-            out.append(cmyk_ops(col))
+            out.append(colour_ops(col))
             fill = col
         if s.paint in ("B", "S"):
             if col != stroke:
-                out.append(cmyk_ops(col, stroke=True))
+                out.append(colour_ops(col, stroke=True))
                 stroke = col
             if s.width != width:
                 out.append(f"{num(s.width)} w")
@@ -66,6 +76,20 @@ def shapes_ops(shapes: Sequence[Shape], palette: Mapping[str, Sequence[float]]) 
     return "\n".join(out)
 
 
+def _page(body: Sequence[str], offset: float = 0.0) -> bytes:
+    """Page content in millimetres: scale mm → pt and shift by `offset` mm."""
+    s = f"{PT_PER_MM:.6f}"
+    o = f"{offset * PT_PER_MM:.6f}".rstrip("0").rstrip(".") or "0"
+    parts = [
+        "q",
+        f"{s} 0 0 {s} {o} {o} cm",
+        "1 j 1 J",  # round joins/caps for emboldening strokes
+        *body,
+        "Q",
+    ]
+    return ("\n".join(p for p in parts if p) + "\n").encode("ascii")
+
+
 def sheet_ops(face: str, *, sheet_w: float, sheet_h: float, offset: float, extra: str = "") -> bytes:
     """One A4 sheet: the face upright in the bottom half and rotated by 180°
     in the top half, so the folded tent reads correctly from both sides.
@@ -73,22 +97,13 @@ def sheet_ops(face: str, *, sheet_w: float, sheet_h: float, offset: float, extra
     All coordinates are millimetres relative to the trim box; `offset` is the
     bleed (the trim box origin inside the media box).
     """
-    s = f"{PT_PER_MM:.6f}"
-    o = f"{offset * PT_PER_MM:.6f}".rstrip("0").rstrip(".") or "0"
-    parts = [
-        "q",
-        f"{s} 0 0 {s} {o} {o} cm",
-        "1 j 1 J",  # round joins/caps for emboldening strokes
-        face,
-        "q",
-        f"-1 0 0 -1 {num(sheet_w)} {num(sheet_h)} cm",
-        face,
-        "Q",
-    ]
-    if extra:
-        parts.append(extra)
-    parts.append("Q")
-    return ("\n".join(p for p in parts if p) + "\n").encode("ascii")
+    rotated = ["q", f"-1 0 0 -1 {num(sheet_w)} {num(sheet_h)} cm", face, "Q"] if face else []
+    return _page([face, *rotated, extra], offset)
+
+
+def face_page_ops(face: str) -> bytes:
+    """A single face on a page of its own (preview): no rotated copy."""
+    return _page([face])
 
 
 def pdf_date(epoch: float | None = None) -> str:
