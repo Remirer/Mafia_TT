@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path as FsPath
 from typing import Mapping, Sequence
 
 from . import preview
 from .assets import DEFAULT_CACHE, ICC_NAME, ensure_icc, load_icc
-from .config import Style, load_names, load_style
+from .config import Style, load_names, load_style, normalize_name
 from .layout import EmblemIcons, Face, LayoutError, build_blank_face, build_face
 from .paths import cmyk_ops, num
 from .pdf import PageGeometry, face_page_ops, shapes_ops, sheet_ops, write_pdf
@@ -88,6 +89,78 @@ def _write_sheets(
     return print_pdf, office_pdf
 
 
+_TRANSLIT = dict(
+    zip(
+        "абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+        "a b v g d e e zh z i y k l m n o p r s t u f kh ts ch sh shch _ y _ e yu ya".split(),
+    )
+)
+
+
+def slug(name: str) -> str:
+    """Nickname → Latin file-name part: «РЫЖИЙ» → «ryzhiy»."""
+    out = []
+    for ch in name.lower():
+        t = _TRANSLIT.get(ch, ch)
+        out.append("" if t == "_" else t)
+    s = re.sub(r"[^a-z0-9]+", "_", "".join(out)).strip("_")
+    return s or "nick"
+
+
+def _faces(names: Sequence[str], style: Style, font: HbFont, icons: EmblemIcons | None) -> tuple[list[Face], bool]:
+    """Lay out the named cards and print a line per card; False if any failed."""
+    faces: list[Face] = []
+    ok = True
+    for i, name in enumerate(names, 1):
+        try:
+            face = build_face(name, style, font, icons)
+        except (LayoutError, MissingGlyphError, ValueError) as exc:
+            print(f"  ✗ {i:2d}. {name}: {exc}")
+            ok = False
+            continue
+        faces.append(face)
+        lines = " / ".join(face.layout.lines)
+        print(f"  {i:2d}. {lines:<26} буквы {face.layout.cap_mm:4.1f} мм")
+        for w in face.warnings:
+            print(f"      ! {w}")
+    return faces, ok
+
+
+def _icc(args: argparse.Namespace) -> tuple[bytes | None, FsPath | None]:
+    """ICC profile to embed and its file (for the soft-proof previews)."""
+    if args.no_icc:
+        return None, None
+    if args.icc:
+        return load_icc(args.icc), args.icc
+    icc = ensure_icc()
+    return icc, (DEFAULT_CACHE / ICC_NAME if icc else None)
+
+
+def build_only(args: argparse.Namespace) -> int:
+    """Separate print + office files for the given nicknames only (one pair each)."""
+    style = load_style(args.style)
+    names = [normalize_name(n, style.name.uppercase) for n in args.only]
+    font = HbFont(style.font_path(), style.name.variations, style.name.features)
+    icons = EmblemIcons.load() if style.emblem.enabled else None
+    print(f"Отдельные таблички: {len(names)}. Шрифт: {style.font_path().name}")
+    faces, ok = _faces(names, style, font, icons)
+    if not ok:
+        return 1
+    icc, _ = _icc(args)
+    credits = CREDITS.format(font=style.font_path().stem)
+    print("\nГотово:")
+    for face in faces:
+        tag = slug(face.name)
+        files = (f"mafia_tablichka_{tag}_print_FOGRA39.pdf", f"mafia_tablichka_{tag}_A4_office.pdf")
+        print_pdf, office_pdf = _write_sheets(
+            [face], style, args.out, files, f"Табличка для мафии «{face.name.replace('|', ' ')}»", credits, icc
+        )
+        print(f"  {print_pdf}\n  {office_pdf}")
+        ok &= _verify(print_pdf, "print", style, 1)
+        ok &= _verify(office_pdf, "office", style, 1)
+    return 0 if ok else 1
+
+
 def build(args: argparse.Namespace) -> int:
     style = load_style(args.style)
     names = load_names(args.names, style.name.uppercase)
@@ -95,20 +168,8 @@ def build(args: argparse.Namespace) -> int:
     icons = EmblemIcons.load() if style.emblem.enabled else None
 
     print(f"Табличек: {len(names)} + пустая. Шрифт: {style.font_path().name}")
-    faces: list[Face] = []
-    failed = False
-    for i, name in enumerate(names, 1):
-        try:
-            face = build_face(name, style, font, icons)
-        except (LayoutError, MissingGlyphError, ValueError) as exc:
-            print(f"  ✗ {i:2d}. {name}: {exc}")
-            failed = True
-            continue
-        faces.append(face)
-        lines = " / ".join(face.layout.lines)
-        print(f"  {i:2d}. {lines:<26} буквы {face.layout.cap_mm:4.1f} мм")
-        for w in face.warnings:
-            print(f"      ! {w}")
+    faces, ok = _faces(names, style, font, icons)
+    failed = not ok
     try:
         blank = build_blank_face(style, icons)
         print("   —  пустая табличка (под маркер)")
@@ -118,15 +179,7 @@ def build(args: argparse.Namespace) -> int:
     if failed:
         return 1
 
-    icc: bytes | None
-    icc_file: FsPath | None
-    if args.no_icc:
-        icc, icc_file = None, None
-    elif args.icc:
-        icc, icc_file = load_icc(args.icc), args.icc
-    else:
-        icc = ensure_icc()
-        icc_file = DEFAULT_CACHE / ICC_NAME if icc else None
+    icc, icc_file = _icc(args)
 
     out: FsPath = args.out
     credits = CREDITS.format(font=style.font_path().stem)
@@ -198,10 +251,18 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--no-icc", action="store_true", help="не встраивать профиль (только имя FOGRA39)")
     ap.add_argument("--no-preview", action="store_true", help="не делать PNG-превью")
     ap.add_argument("--verify", type=FsPath, nargs="+", metavar="PDF", help="только проверить готовые PDF")
+    ap.add_argument(
+        "--only",
+        nargs="+",
+        metavar="НИК",
+        help="собрать отдельные файлы только для этих ников (общие файлы не трогаются)",
+    )
     args = ap.parse_args(argv)
 
     if args.verify:
         return _verify_files(args.verify, load_style(args.style))
+    if args.only:
+        return build_only(args)
     return build(args)
 
 

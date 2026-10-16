@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pypdf import PdfReader
 
-from cards.__main__ import main
+from cards.__main__ import main, slug
 from cards.config import load_names, load_style, normalize_name
 from cards.layout import EmblemIcons, build_blank_face, build_face, layout_name
 from cards.paths import apply, box_inside, boxes_overlap, flatten
@@ -160,3 +160,17 @@ def test_cli_build_is_reproducible(tmp_path, monkeypatch):
         "mafia_tablichki_preview.pdf",
     ):
         assert (a / name).read_bytes() == (b / name).read_bytes()
+
+
+def test_slug_transliterates_nicknames():
+    assert slug("РЫЖИЙ") == "ryzhiy"
+    assert slug("ДЕН ФАРТ YG") == "den_fart_yg"
+    assert slug("ГОГА НУТ|ФУТБОЛ 28") == "goga_nut_futbol_28"
+
+
+def test_cli_only_builds_separate_pair(tmp_path):
+    assert main(["--out", str(tmp_path), "--no-icc", "--only", "рыжий"]) == 0
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ["mafia_tablichka_ryzhiy_A4_office.pdf", "mafia_tablichka_ryzhiy_print_FOGRA39.pdf"]
+    for name in files:
+        assert len(PdfReader(tmp_path / name).pages) == 1
